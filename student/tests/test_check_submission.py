@@ -65,7 +65,8 @@ def submission(tmp_path: Path) -> Path:
     (root / checker.SUBMISSION).write_text(
         "- Họ tên: Nguyen Van A\n- MSSV: 2A20260000\n"
         "- Link repo (fork): https://github.com/a/K4-L2L3-DAY23-NguyenVanA-2A20260000-SensorFusion\n"
-        "- Công cụ đã dùng (ChatGPT, Copilot, Claude, …): Không dùng AI\n"
+        "- Công cụ đã dùng (ChatGPT, Copilot, Claude, …): Không dùng AI\n",
+        encoding="utf-8",
     )
     _git(root, "init", "-q")
     _commit_all(root)
@@ -97,7 +98,9 @@ def test_metrics_inconsistent_with_log_fails(submission: Path) -> None:
 
 
 def test_blank_submission_field_fails(submission: Path) -> None:
-    (submission / checker.SUBMISSION).write_text("- Họ tên:\n- MSSV: 1\n")
+    (submission / checker.SUBMISSION).write_text(
+        "- Họ tên:\n- MSSV: 1\n", encoding="utf-8"
+    )
     _commit_all(submission)
     assert _failed(submission) == ["SUBMISSION.md: thông tin + khai báo AI"]
 
@@ -115,5 +118,7 @@ def test_forbidden_file_and_secret_fail(submission: Path) -> None:
 
 
 def test_uncommitted_change_fails(submission: Path) -> None:
-    (submission / checker.SUBMISSION).write_text("- Họ tên: changed\n")
+    (submission / checker.SUBMISSION).write_text(
+        "- Họ tên: changed\n", encoding="utf-8"
+    )
     assert "Mọi thay đổi trong student/ đã commit" in _failed(submission)

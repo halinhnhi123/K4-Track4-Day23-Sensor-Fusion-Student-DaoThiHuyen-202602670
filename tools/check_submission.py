@@ -56,7 +56,13 @@ TODO_MARKER = re.compile(r"raise\s+NotImplementedError\(\s*[\"']TODO")
 
 
 def git(root: Path, *args: str) -> str:
-    result = subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True, check=True)
+    result = subprocess.run(
+        ["git", "-C", str(root), *args],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=True,
+    )
     return result.stdout
 
 
