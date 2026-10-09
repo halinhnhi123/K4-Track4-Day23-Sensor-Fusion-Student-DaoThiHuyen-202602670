@@ -27,6 +27,49 @@ def _noise_covariance(name: str) -> np.matrix:
     return np.asmatrix(np.diag(np.square(scales[name])))
 
 
+def _invert_transform(transform: np.ndarray) -> np.ndarray:
+    """Invert a small calibration transform without calling native LAPACK."""
+    if transform.shape != (4, 4) or not np.isfinite(transform).all():
+        raise ValueError("Camera extrinsic transform must be a finite 4x4 matrix")
+
+    augmented = [
+        [float(transform[row, column]) for column in range(4)]
+        + [float(row == column) for column in range(4)]
+        for row in range(4)
+    ]
+    for pivot_column in range(4):
+        pivot_row = max(
+            range(pivot_column, 4),
+            key=lambda row: abs(augmented[row][pivot_column]),
+        )
+        pivot = augmented[pivot_row][pivot_column]
+        if pivot == 0:
+            raise ValueError("Camera extrinsic transform must be invertible")
+        augmented[pivot_column], augmented[pivot_row] = (
+            augmented[pivot_row],
+            augmented[pivot_column],
+        )
+
+        pivot = augmented[pivot_column][pivot_column]
+        augmented[pivot_column] = [value / pivot for value in augmented[pivot_column]]
+        for row in range(4):
+            if row == pivot_column:
+                continue
+            factor = augmented[row][pivot_column]
+            augmented[row] = [
+                value - factor * pivot_value
+                for value, pivot_value in zip(
+                    augmented[row], augmented[pivot_column]
+                )
+            ]
+    return np.asarray([row[4:] for row in augmented], dtype=float)
+
+
+def _matmul(left: np.ndarray, right: np.ndarray) -> np.ndarray:
+    """Multiply small calibration matrices without dispatching to native BLAS."""
+    return np.sum(left[:, :, None] * right[None, :, :], axis=1)
+
+
 class Sensor:
     """Adapt lidar positions or calibrated camera pixels to a six-state EKF.
 
@@ -67,13 +110,18 @@ class Sensor:
                 (self.c_i - np.array([self.image_width, 0.0])) / self.f_i
             )
         self.sens_to_veh = np.asmatrix(transform)
-        self.veh_to_sens = np.asmatrix(np.linalg.inv(transform))
+        self.veh_to_sens = np.asmatrix(_invert_transform(transform))
         self.fov = tuple(float(bound) for bound in angular_bounds)
 
     def _position_in_sensor(self, x: Matrix) -> np.ndarray:
         position = np.asarray(x, dtype=float).reshape(-1)[:3]
+        if not np.isfinite(position).all():
+            return np.full(3, np.nan)
         transform = np.asarray(self.veh_to_sens)
-        return transform[:3, :3] @ position + transform[:3, 3]
+        transformed = _matmul(
+            transform[:3, :3], position.reshape(-1, 1)
+        ).reshape(-1)
+        return transformed + transform[:3, 3]
 
     def _camera_position(self, x: Matrix) -> np.ndarray:
         position = self._position_in_sensor(x)
@@ -136,7 +184,7 @@ class Sensor:
                 [self.f_i * left / depth**2, -self.f_i / depth, 0.0],
                 [self.f_j * up / depth**2, 0.0, -self.f_j / depth],
             ])
-            derivative = projection @ rotation
+            derivative = _matmul(projection, rotation)
         return np.asmatrix(
             np.pad(derivative, ((0, 0), (0, params.dim_state - 3)))
         )

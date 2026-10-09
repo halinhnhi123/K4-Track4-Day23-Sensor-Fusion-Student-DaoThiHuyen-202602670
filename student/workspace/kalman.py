@@ -11,9 +11,66 @@ from typing import Optional
 
 import numpy as np
 
-Matrix = np.matrix | np.ndarray
+from fusion_lab.workspace_support import get_tracking_params
 
-# vi: Gợi ý module — params = get_tracking_params() sau khi import ở trên.
+Matrix = np.ndarray
+
+params = get_tracking_params()
+
+
+def _matmul(left: Matrix, right: Matrix) -> Matrix:
+    """Multiply small matrices without dispatching to the platform BLAS."""
+    left_array = np.asarray(left, dtype=float)
+    right_array = np.asarray(right, dtype=float)
+    if left_array.ndim != 2 or right_array.ndim != 2:
+        raise ValueError("Matrix multiplication requires two 2D arrays")
+    if left_array.shape[1] != right_array.shape[0]:
+        raise ValueError(
+            f"Incompatible matrix shapes: {left_array.shape} and {right_array.shape}"
+        )
+    return np.sum(left_array[:, :, None] * right_array[None, :, :], axis=1)
+
+
+def _inverse(matrix: Matrix) -> Matrix:
+    """Invert a small square matrix with pivoted Gauss-Jordan elimination."""
+    values = np.asarray(matrix, dtype=float)
+    if values.ndim != 2 or values.shape[0] != values.shape[1]:
+        raise ValueError("Matrix inverse requires a square 2D array")
+
+    size = values.shape[0]
+    augmented = [
+        [float(values[row, column]) for column in range(size)]
+        + [float(row == column) for column in range(size)]
+        for row in range(size)
+    ]
+
+    for pivot_column in range(size):
+        pivot_row = max(
+            range(pivot_column, size),
+            key=lambda row: abs(augmented[row][pivot_column]),
+        )
+        pivot = augmented[pivot_row][pivot_column]
+        if pivot == 0:
+            raise np.linalg.LinAlgError("Singular matrix")
+        augmented[pivot_column], augmented[pivot_row] = (
+            augmented[pivot_row],
+            augmented[pivot_column],
+        )
+
+        pivot = augmented[pivot_column][pivot_column]
+        augmented[pivot_column] = [value / pivot for value in augmented[pivot_column]]
+        for row in range(size):
+            if row == pivot_column:
+                continue
+            factor = augmented[row][pivot_column]
+            augmented[row] = [
+                value - factor * pivot_value
+                for value, pivot_value in zip(
+                    augmented[row], augmented[pivot_column]
+                )
+            ]
+
+    return np.asarray([row[size:] for row in augmented], dtype=float)
 
 
 def build_F(dt: Optional[float] = None) -> Matrix:
@@ -23,11 +80,16 @@ def build_F(dt: Optional[float] = None) -> Matrix:
         dt: Time step in seconds; default from tracking params.
 
     Returns:
-        6x6 state transition matrix as ``np.matrix``.
+        6x6 state transition matrix as a NumPy array.
     """
-    # vi: TODO Part E — Nếu dt is None, lấy params.dt từ get_tracking_params().
-    # vi: F = I_6; gán F[0,3]=F[1,4]=F[2,5]=dt (vị trí += v * dt).
-    raise NotImplementedError("TODO: implement build_F")
+    if dt is None:
+        dt = params.dt
+
+    F = np.eye(6, dtype=float)
+    F[0, 3] = dt
+    F[1, 4] = dt
+    F[2, 5] = dt
+    return F
 
 
 def build_Q(dt: Optional[float] = None, q: Optional[float] = None) -> Matrix:
@@ -40,8 +102,13 @@ def build_Q(dt: Optional[float] = None, q: Optional[float] = None) -> Matrix:
     Returns:
         6x6 process noise matrix.
     """
-    # vi: TODO Part E — Q đường chéo: q_diag = dt * q trên 6 trục (mô hình lab).
-    raise NotImplementedError("TODO: implement build_Q")
+    if dt is None:
+        dt = params.dt
+    if q is None:
+        q = params.q
+
+    q_diag = np.full(6, dt * q, dtype=float)
+    return np.diag(q_diag)
 
 
 def ekf_predict(
@@ -61,8 +128,19 @@ def ekf_predict(
     Returns:
         Tuple ``(x_pred, P_pred)``.
     """
-    # vi: TODO Part E — x_pred = F @ x; P_pred = F @ P @ F.T + Q (dùng ma trận np).
-    raise NotImplementedError("TODO: implement ekf_predict")
+    if F is None:
+        F = build_F()
+    if Q is None:
+        Q = build_Q()
+
+    x = np.asarray(x, dtype=float).reshape(-1, 1)
+    P = np.asarray(P, dtype=float)
+    F = np.asarray(F, dtype=float)
+    Q = np.asarray(Q, dtype=float)
+
+    x_pred = _matmul(F, x)
+    P_pred = _matmul(_matmul(F, P), F.T) + Q
+    return x_pred, P_pred
 
 
 def innovation(x: Matrix, meas: Any) -> Matrix:
@@ -75,8 +153,10 @@ def innovation(x: Matrix, meas: Any) -> Matrix:
     Returns:
         Innovation vector ``z - h(x)``.
     """
-    # vi: TODO Part E — return meas.z - meas.sensor.get_hx(x).
-    raise NotImplementedError("TODO: implement innovation")
+    x = np.asarray(x, dtype=float)
+    z = np.asarray(meas.z, dtype=float).reshape(-1, 1)
+    h_x = np.asarray(meas.sensor.get_hx(x), dtype=float).reshape(-1, 1)
+    return z - h_x
 
 
 def innovation_covariance(P: Matrix, meas: Any, H: Matrix) -> Matrix:
@@ -90,8 +170,10 @@ def innovation_covariance(P: Matrix, meas: Any, H: Matrix) -> Matrix:
     Returns:
         Innovation covariance matrix S.
     """
-    # vi: TODO Part E — S = H @ P @ H.T + meas.R (dùng @ với cả ndarray/matrix).
-    raise NotImplementedError("TODO: implement innovation_covariance")
+    P = np.asarray(P, dtype=float)
+    H = np.asarray(H, dtype=float)
+    R = np.asarray(meas.R, dtype=float)
+    return _matmul(_matmul(H, P), H.T) + R
 
 
 def ekf_update(x: Matrix, P: Matrix, meas: Any) -> tuple[Matrix, Matrix]:
@@ -105,6 +187,18 @@ def ekf_update(x: Matrix, P: Matrix, meas: Any) -> tuple[Matrix, Matrix]:
     Returns:
         Tuple ``(x_upd, P_upd)``.
     """
-    # vi: TODO Part E — H = meas.sensor.get_H(x); gamma, S; K = P H' S^{-1};
-    # vi: x_upd = x + K gamma; P_upd = (I - K H) P.
-    raise NotImplementedError("TODO: implement ekf_update")
+    x = np.asarray(x, dtype=float)
+    P = np.asarray(P, dtype=float)
+    H = np.asarray(meas.sensor.get_H(x), dtype=float)
+    gamma = innovation(x, meas)
+    S = innovation_covariance(P, meas, H)
+    K = _matmul(_matmul(P, H.T), _inverse(S))
+
+    I = np.eye(P.shape[0])
+    residual_map = I - _matmul(K, H)
+    x_upd = x + _matmul(K, gamma)
+    P_upd = (
+        _matmul(_matmul(residual_map, P), residual_map.T)
+        + _matmul(_matmul(K, np.asarray(meas.R, dtype=float)), K.T)
+    )
+    return x_upd, P_upd
